@@ -1,0 +1,12 @@
+
+
+build/
+*/build/
+
+.git
+.gitignore
+
+*.md
+*.log
+
+.vscode

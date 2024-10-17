@@ -1,0 +1,16 @@
+/build/
+*.o
+*.obj
+*.so
+*.dll
+*.exe
+*.log
+
+
+/www/node_modules/
+**/.DS_STORE
+**/build/
+**/dist/
+*.log*
+.vscode
+**/coverage/
