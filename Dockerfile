@@ -50,6 +50,8 @@ WORKDIR /app
 
 COPY --from=builder /app/build/cap_returns /app/cap_returns
 COPY www/dist /app/www
+COPY data /app/data
+COPY data /data
 
 EXPOSE 8080
 

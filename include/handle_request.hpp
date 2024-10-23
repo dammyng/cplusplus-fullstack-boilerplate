@@ -18,6 +18,12 @@
 #include "jwt-cpp/jwt.h"
 #include "Config.hpp"
 #include "auth_helpers.hpp"
+#include "csv_loader.hpp"
+#include "handler_hello.hpp"
+#include "handler_loadcsv.hpp"
+#include "handler_db.hpp"
+#include "handler_login.hpp"
+#include "request_utils.hpp"
 
 using json = nlohmann::json;
 namespace beast = boost::beast;
@@ -39,287 +45,46 @@ void handle_request(
     // List of protected routes that require JWT authentication
     std::vector<std::string> protected_routes = {"/api", "/db"};
 
-    // Check if the requested route is protected
-    bool is_protected = false;
-    for (const auto &route : protected_routes)
+    // Perform the authorization check
+    if (!check_protected_route(req, std::forward<Send>(send), protected_routes, config))
     {
-        if (req.target().starts_with(route))
-        {
-            is_protected = true;
-            break;
-        }
+        return;
     }
 
-    if (is_protected)
-    {
-        // Extract the Bearer token from the Authorization header
-        auto token_opt = extract_bearer_token(req);
-        if (!token_opt.has_value())
-        {
-            spdlog::warn("Missing or malformed Authorization header.");
-            // Respond with 401 Unauthorized
-            StandardResponse res_struct = create_error_response(401, "Missing or malformed Authorization header.", "Unauthorized");
-            json res_json = res_struct.to_json();
-            std::string response_body = res_json.dump();
-
-            http::response<http::string_body> res{
-                http::status::unauthorized, req.version()};
-            res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-            res.set(http::field::content_type, "application/json");
-            res.keep_alive(req.keep_alive());
-            res.body() = response_body;
-            res.prepare_payload();
-            return send(std::move(res));
-        }
-
-        std::string token = token_opt.value();
-
-        // Verify the JWT token
-        bool is_valid = verify_jwt(token, config.jwt_secret, config.jwt_issuer);
-        if (!is_valid)
-        {
-            // Respond with 403 Forbidden
-            StandardResponse res_struct = create_error_response(403, "Invalid or expired token.", "Forbidden");
-            json res_json = res_struct.to_json();
-            std::string response_body = res_json.dump();
-
-            http::response<http::string_body> res{
-                http::status::forbidden, req.version()};
-            res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-            res.set(http::field::content_type, "application/json");
-            res.keep_alive(req.keep_alive());
-            res.body() = response_body;
-            res.prepare_payload();
-            return send(std::move(res));
-        }
-
-        spdlog::info("JWT verification successful for request to {}", req.target());
-    }
-
-    // Helper function to create and send standardized error responses
-    auto const bad_request = [&](beast::string_view why)
-    {
-        spdlog::warn("Bad request: {}", why);
-
-        StandardResponse res_struct = create_error_response(400, std::string(why), "Bad Request");
-        json res_json = res_struct.to_json();
-        std::string response_body = res_json.dump();
-
-        http::response<http::string_body> res{
-            http::status::bad_request, req.version()};
-        res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-        res.set(http::field::content_type, "application/json");
-        res.keep_alive(req.keep_alive());
-        res.body() = response_body;
-        res.prepare_payload();
-        return res;
-    };
-
-    auto const not_found = [&](beast::string_view target)
-    {
-        spdlog::warn("Resource not found: {}", target);
-
-        StandardResponse res_struct = create_not_found_response(std::string(target));
-        json res_json = res_struct.to_json();
-        std::string response_body = res_json.dump();
-
-        http::response<http::string_body> res{
-            http::status::not_found, req.version()};
-        res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-        res.set(http::field::content_type, "application/json");
-        res.keep_alive(req.keep_alive());
-        res.body() = response_body;
-        res.prepare_payload();
-        return res;
-    };
-
-    auto const server_error = [&](beast::string_view what)
-    {
-        spdlog::error("Server error: {}", what);
-
-        StandardResponse res_struct = create_internal_server_error_response(std::string(what));
-        json res_json = res_struct.to_json();
-        std::string response_body = res_json.dump();
-
-        http::response<http::string_body> res{
-            http::status::internal_server_error, req.version()};
-        res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-        res.set(http::field::content_type, "application/json");
-        res.keep_alive(req.keep_alive());
-        res.body() = response_body;
-        res.prepare_payload();
-        return res;
-    };
-
-    if (req.method() != http::verb::get && req.method() != http::verb::head)
-    {
-        spdlog::warn("Unsupported HTTP method: {}", req.method_string());
-
-        StandardResponse res_struct = create_error_response(400, "Unsupported HTTP method", "Bad Request");
-        json res_json = res_struct.to_json();
-        std::string response_body = res_json.dump();
-
-        http::response<http::string_body> res{
-            http::status::bad_request, req.version()};
-        res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-        res.set(http::field::content_type, "application/json");
-        res.keep_alive(req.keep_alive());
-        res.body() = response_body;
-        res.prepare_payload();
-
-        spdlog::info("Bad request response sent");
-        return send(std::move(res));
-    }
-
-    // **Handle the /login route**
     if (req.target() == "/login" && req.method() == http::verb::post)
     {
-        spdlog::info("Handling /login route");
-
-        json request_json;
-        try
-        {
-            request_json = json::parse(req.body());
-        }
-        catch (const std::exception &e)
-        {
-            spdlog::warn("Invalid JSON in /login request: {}", e.what());
-            http::response<http::string_body> res = bad_request("Invalid JSON format.");
-            return send(std::move(res));
-        }
-
-        // Extract username and password
-        std::string username;
-        std::string password;
-        try
-        {
-            username = request_json.at("username").get<std::string>();
-            password = request_json.at("password").get<std::string>();
-        }
-        catch (const std::exception &e)
-        {
-            spdlog::warn("Missing username or password in /login request: {}", e.what());
-            http::response<http::string_body> res = bad_request("Missing username or password.");
-            return send(std::move(res));
-        }
-
-        // Authenticate user (this is a placeholder; implement actual authentication logic)
-        // bool is_authenticated = db->authenticate_user(username, password); 
-        bool is_authenticated = true; // Always true in mock
-
-        if (!is_authenticated)
-        {
-            spdlog::warn("Authentication failed for user: {}", username);
-            // Respond with 401 Unauthorized
-            StandardResponse res_struct = create_error_response(401, "Invalid credentials.", "Unauthorized");
-            json res_json = res_struct.to_json();
-            std::string response_body = res_json.dump();
-
-            http::response<http::string_body> res{
-                http::status::unauthorized, req.version()};
-            res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-            res.set(http::field::content_type, "application/json");
-            res.keep_alive(req.keep_alive());
-            res.body() = response_body;
-            res.prepare_payload();
-            return send(std::move(res));
-        }
-
-        // Create JWT token
-        auto token = jwt::create()
-                         .set_issuer(config.jwt_issuer)
-                         .set_type("JWS")
-                         .set_subject(username)
-                         .set_issued_at(std::chrono::system_clock::now())
-                         .set_expires_at(std::chrono::system_clock::now() + std::chrono::seconds(config.jwt_expiration))
-                         .sign(jwt::algorithm::hs256{config.jwt_secret});
-
-        spdlog::info("JWT token created for user: {}", username);
-
-        json data = {
-            {"token", token}};
-
-        StandardResponse res_struct = create_success_response(200, data);
-        json res_json = res_struct.to_json();
-        std::string response_body = res_json.dump();
-
-        http::response<http::string_body> res{
-            http::status::ok, req.version()};
-        res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-        res.set(http::field::content_type, "application/json");
-        res.keep_alive(req.keep_alive());
-        res.body() = response_body;
-        res.prepare_payload();
-        spdlog::info("/login response sent");
-        return send(std::move(res));
+        handle_login_route(std::forward<decltype(req)>(req), send, db);
+        return;
     }
 
     if (req.target() == "/hello")
     {
-        spdlog::info("Handling /hello route");
-
-        json data = {
-            {"message", "Hello worlded"}};
-
-        // Create a standardized success response
-        StandardResponse res_struct = create_success_response(200, data);
-        json res_json = res_struct.to_json();
-
-        std::string response_body = res_json.dump();
-
-        http::response<http::string_body> res{
-            http::status::ok, req.version()};
-        res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-        res.set(boost::beast::http::field::content_type, "application/json");
-        res.keep_alive(req.keep_alive());
-        res.body() = response_body;
-        res.prepare_payload();
-        spdlog::info("/hello response sent");
-        return send(std::move(res));
+        handle_hello_route(std::forward<decltype(req)>(req), send);
+        return;
     }
 
-    // **Handle the /db route**
     if (req.target() == "/db")
     {
-        spdlog::info("Handling /db route");
-        try
+        handle_db_route(std::forward<decltype(req)>(req), send, db);
+        return;
+    }
+
+    if (req.target().starts_with("/loadcsv/"))
+    {
+        // Extract the file name after '/loadcsv/'
+        std::string target_str = std::string(req.target());
+        std::string file_name = target_str.substr(std::string("/loadcsv/").length());
+
+        // Validate the file name if necessary (e.g., check against a list of valid symbols or format)
+        if (file_name.empty())
         {
-            json data = db->getData(); 
-            spdlog::info("Database returned data");
-
-            StandardResponse res_struct = create_success_response(200, data);
-            json res_json = res_struct.to_json();
-
-            std::string response_body = res_json.dump();
-
-            http::response<http::string_body> res{
-                http::status::ok, req.version()};
-            res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-            res.set(http::field::content_type, "application/json");
-            res.keep_alive(req.keep_alive());
-            res.body() = response_body;
-            res.prepare_payload();
-            spdlog::info("/db response sent");
+            http::response<http::string_body> res = bad_request(req, "Missing file name.");
             return send(std::move(res));
         }
-        catch (const std::exception &e)
-        {
-            spdlog::error("Database error: {}", e.what());
 
-            StandardResponse res_struct = create_internal_server_error_response(e.what());
-            json res_json = res_struct.to_json();
-            std::string response_body = res_json.dump();
-
-            http::response<http::string_body> res{
-                http::status::internal_server_error, req.version()};
-            res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-            res.set(http::field::content_type, "application/json");
-            res.keep_alive(req.keep_alive());
-            res.body() = response_body;
-            res.prepare_payload();
-            spdlog::info("/db error response sent");
-            return send(std::move(res));
-        }
+        // Pass the file name to the route handler
+        handle_loadcsv_route(std::forward<decltype(req)>(req), send, db, file_name);
+        return;
     }
 
     if (req.target().empty() ||
@@ -327,7 +92,7 @@ void handle_request(
         req.target().find("..") != beast::string_view::npos)
     {
         spdlog::warn("Illegal request-target: {}", req.target());
-        return send(bad_request("Illegal request-target"));
+        return send(bad_request(req, "Illegal request-target"));
     }
 
     // Build the path to the requested file
@@ -341,11 +106,6 @@ void handle_request(
     http::file_body::value_type body;
     body.open(path.c_str(), beast::file_mode::scan, ec);
 
-    if (ec == beast::errc::no_such_file_or_directory)
-    {
-        spdlog::warn("File not found: {}", path);
-        return send(not_found(req.target()));
-    }
 
     if (ec == beast::errc::no_such_file_or_directory)
     {
@@ -412,4 +172,4 @@ void handle_request(
     return send(std::move(res));
 }
 
-#endif 
+#endif
